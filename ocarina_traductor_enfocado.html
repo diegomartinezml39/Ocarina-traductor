@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Zelda N64 · Traductor enfocado</title>
+<style>
+:root{color-scheme:dark;--gold:#f1d77b;--green:#347449}*{box-sizing:border-box}
+body{margin:0;background:#0a100b;color:#f8f4e6;font-family:system-ui,Arial,sans-serif}
+header{text-align:center;padding:14px 12px 8px}h1{margin:0;color:var(--gold);font-size:1.3rem}header p{margin:4px 0;color:#bdc9b8;font-size:.86rem}
+main{max-width:720px;margin:auto;padding:0 12px 22px}.camera{position:relative;background:#030503;border:1px solid #53634a;border-radius:14px;overflow:hidden;min-height:230px}
+video{width:100%;max-height:55vh;display:block;object-fit:contain}#placeholder{padding:60px 20px;text-align:center;color:#c4cebf}
+#overlay{position:absolute;left:4%;right:4%;bottom:4%;background:rgba(0,0,0,.91);border:1px solid #e5c85f;border-radius:10px;padding:10px 12px;text-align:center;pointer-events:none}
+#sourceLine{font-size:.76rem;color:#d5d8cd;margin-bottom:4px}#translatedLine{font-size:1.15rem;font-weight:800;line-height:1.3;color:#fff}
+button{border:0;border-radius:10px;padding:12px;background:var(--green);color:#fff;font-weight:750;font-size:.95rem;cursor:pointer;flex:1;min-width:125px}
+button.alt{background:#29372c;border:1px solid #596d56}button:disabled{opacity:.45}
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.card{background:#172119;border:1px solid #394c39;border-radius:12px;padding:13px;margin-top:12px}
+h2{font-size:1rem;color:var(--gold);margin:0 0 9px}.status{font-size:.87rem;color:#e6d28b;padding:5px 1px}
+.help{font-size:.88rem;line-height:1.45;color:#c4cec0}label{display:block;font-size:.88rem;color:#dce5d8;margin:10px 0 5px}
+input[type=range]{width:100%;accent-color:#e5c85f}textarea{width:100%;min-height:68px;background:#0d140e;color:#fff;border:1px solid #52644e;border-radius:8px;padding:10px;font:inherit}
+footer{text-align:center;color:#899788;font-size:.78rem;padding:14px 0}.hide{display:none!important}
+</style></head>
+<body>
+<header><h1>🗡️ Ocarina of Time · Traductor en vivo</h1><p>Detecta diálogos · Inglés → Español · Sin fotos manuales</p></header>
+<main>
+<div class="camera">
+<div id="placeholder">Coloca el cuadro de diálogo dentro del área de cámara y pulsa Iniciar.<br>El sistema prioriza la zona inferior del televisor.</div>
+<video id="video" autoplay muted playsinline class="hide"></video>
+<div id="overlay" class="hide"><div id="sourceLine">Esperando texto del juego…</div><div id="translatedLine">La traducción aparecerá aquí</div></div>
+</div>
+<div class="controls"><button id="start">▶ Iniciar traductor</button><button id="stop" class="alt" disabled>■ Detener</button></div>
+<div id="status" class="status">Listo para iniciar. La cámara no guarda imágenes.</div>
+<div class="card">
+<h2>Ajustar zona de lectura</h2>
+<p class="help">Mueve el recorte para que incluya el cuadro de diálogo y excluya el resto de la pantalla. Ajuste recomendado: zona inferior.</p>
+<label for="top">Inicio vertical del recorte: <span id="topVal">48%</span></label>
+<input id="top" type="range" min="25" max="75" value="48">
+<label for="height">Altura del recorte: <span id="heightVal">48%</span></label>
+<input id="height" type="range" min="20" max="65" value="48">
+<label for="interval">Frecuencia de lectura: <span id="intervalVal">1.2 s</span></label>
+<input id="interval" type="range" min="6" max="25" value="12">
+<div class="controls"><button id="recalibrate" class="alt">Aplicar ajustes</button></div>
+</div>
+<div class="card">
+<h2>Corrección manual opcional</h2>
+<textarea id="manual" placeholder="Si el OCR se equivoca, corrige aquí el texto en inglés."></textarea>
+<div class="controls"><button id="translateManual">Traducir texto corregido</button></div>
+</div>
+<div class="card"><h2>Cómo funciona</h2><p class="help">El programa analiza repetidamente una región de la cámara, intenta leer texto en inglés y solo solicita traducción cuando el diálogo cambia. Está optimizado para concentrarse en los cuadros de texto, pero no reconoce perfectamente la interfaz del juego: reflejos, perspectiva, baja resolución o letras animadas pueden afectar el resultado.</p><p class="help">Requiere internet para cargar el OCR y traducir. Para permitir cámara, abre esta página desde HTTPS o localhost. No se conecta a la Nintendo 64; basta con apuntar la cámara al televisor.</p></div>
+<footer>Prototipo web · La imagen se procesa en el navegador y no se guarda.</footer>
+<canvas id="canvas" class="hide"></canvas>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+const $=id=>document.getElementById(id), video=$('video'), canvas=$('canvas'), ctx=canvas.getContext('2d',{willReadFrequently:true});
+let stream=null,worker=null,running=false,working=false,lastText='',lastTranslated='',timer=null,lastTranslateAt=0;
+function status(s){$('status').textContent=s}
+const topRange=$('top'),heightRange=$('height'),intervalRange=$('interval');
+function updateLabels(){$('topVal').textContent=topRange.value+'%';$('heightVal').textContent=heightRange.value+'%';$('intervalVal').textContent=(intervalRange.value/10).toFixed(1)+' s'}
+[topRange,heightRange,intervalRange].forEach(el=>el.addEventListener('input',updateLabels));updateLabels();
+async function getWorker(){if(worker)return worker;if(!window.Tesseract)throw Error('No se pudo cargar OCR. Revisa internet.');status('Cargando OCR por primera vez…');worker=await Tesseract.createWorker('eng');await worker.setParameters({tessedit_pageseg_mode:Tesseract.PSM.SINGLE_BLOCK,preserve_interword_spaces:'1',tessedit_char_whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'!?.,:;-() "});return worker}
+function clean(s){return s.replace(/[\r\n]+/g,' ').replace(/\s+/g,' ').replace(/[|]/g,'I').trim()}
+function similar(a,b){if(!a||!b)return false;const x=a.toLowerCase().replace(/[^a-z0-9]/g,''),y=b.toLowerCase().replace(/[^a-z0-9]/g,'');if(!x||!y)return false;let same=0;for(const c of x)if(y.includes(c))same++;return same/Math.max(x.length,y.length)>.88}
+async function doTranslate(raw,force=false){
+ const text=clean(raw);if(text.length<3)return;
+ $('sourceLine').textContent=text;$('manual').value=text;
+ if(!force&&(similar(text,lastTranslated)||text===lastTranslated))return;
+ $('translatedLine').textContent='Traduciendo…';
+ try{const u='https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=es&dt=t&q='+encodeURIComponent(text);const r=await fetch(u);if(!r.ok)throw Error();const d=await r.json();const tr=(d[0]||[]).map(x=>x[0]||'').join('').trim();if(tr){$('translatedLine').textContent=tr;lastTranslated=text;lastTranslateAt=Date.now();status('Traductor activo · diálogo actualizado')}}
+ catch(e){$('translatedLine').textContent='No se pudo traducir. Revisa tu conexión.';status('Error de traducción; OCR sigue disponible.')}
+}
+async function scan(){
+ if(!running||working||video.readyState<2)return;working=true;
+ try{
+  const w=await getWorker(),w0=video.videoWidth,h0=video.videoHeight;if(!w0||!h0)return;
+  const sy=Math.round(h0*Number(topRange.value)/100),sh=Math.min(h0-sy,Math.round(h0*Number(heightRange.value)/100)),sx=Math.round(w0*.04),sw=Math.round(w0*.92);
+  const scale=Math.min(2,1400/sw);canvas.width=Math.max(1,Math.round(sw*scale));canvas.height=Math.max(1,Math.round(sh*scale));
+  ctx.filter='contrast(1.35) grayscale(1)';ctx.drawImage(video,sx,sy,sw,sh,0,0,canvas.width,canvas.height);ctx.filter='none';
+  const result=await w.recognize(canvas),text=clean(result.data.text||'');
+  // Filtra texto de HUD y errores típicos: busca frases con letras y no números aislados.
+  const letters=(text.match(/[A-Za-z]/g)||[]).length, ratio=letters/Math.max(1,text.length);
+  if(text.length>=4&&letters>=3&&ratio>.42){
+    if(!similar(text,lastText)){lastText=text;await doTranslate(text)}
+    else if(Date.now()-lastTranslateAt>4500 && text!==lastTranslated){await doTranslate(text)}
+  }
+ }catch(e){status(e.message||'No se pudo analizar la cámara.')}
+ finally{working=false;if(running)timer=setTimeout(scan,Number(intervalRange.value)*100)}
+}
+$('start').onclick=async()=>{
+ try{if(!navigator.mediaDevices?.getUserMedia)throw Error('El navegador requiere HTTPS para abrir la cámara.');stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});video.srcObject=stream;await video.play();running=true;video.classList.remove('hide');$('placeholder').classList.add('hide');$('overlay').classList.remove('hide');$('start').disabled=true;$('stop').disabled=false;status('Cámara activa · buscando cuadro de diálogo…');scan()}
+ catch(e){status(e.message||'No se pudo activar la cámara.');alert('Permite el acceso a la cámara y abre la página desde HTTPS o localhost.')}
+};
+function stop(){running=false;if(timer)clearTimeout(timer);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;video.classList.add('hide');$('placeholder').classList.remove('hide');$('overlay').classList.add('hide');$('start').disabled=false;$('stop').disabled=true;status('Traductor detenido.')}
+$('stop').onclick=stop;
+$('recalibrate').onclick=()=>{lastText='';status('Ajustes aplicados. Se actualizarán en el siguiente análisis.')};
+$('translateManual').onclick=()=>doTranslate($('manual').value,true);
+window.addEventListener('pagehide',()=>{running=false;if(stream)stream.getTracks().forEach(t=>t.stop());if(worker)worker.terminate()});
+</script></body></html>
